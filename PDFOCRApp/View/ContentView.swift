@@ -1,10 +1,6 @@
 import SwiftUI
 import Vision
-import VisionKit
 import PDFKit
-import UniformTypeIdentifiers
-import CoreML
-import CoreImage
 
 enum FileType {
     case pdf
@@ -12,504 +8,398 @@ enum FileType {
 }
 
 struct ContentView: View {
-    @State private var ocrResult: String = "여기에 OCR 결과가 표시됩니다"
+    @State private var ocrResult: String = ""
     @State private var isProcessing: Bool = false
     @State private var progressValue: Double = 0
     @State private var pageImages: [NSImage] = []
-    @State private var incorrectTexts: [String] = []
-    @State private var correctionMap: [String: String] = [
-        "0": "O", "1": "l", "Il": "II", "|I": "II", "5S": "SS", "8B": "BB"
-    ]
-    
+    @State private var showResult: Bool = false
+    @State private var currentPDF: PDFDocument? = nil
+    @State private var inputPDFPath: String? = nil
+
     var body: some View {
-        VStack(spacing: 20) {
-            // Top button bar
-            HStack(spacing: 16) {
-                Button("PDF 열기 및 OCR") {
-                    startOCR(for: .pdf)
-                }
-                Button("이미지 열기 및 OCR") {
-                    startOCR(for: .image)
-                }
-                Button("OCR 삭제") {
-                    deleteOCR()
-                }
+        VStack(spacing: 16) {
+            HStack(spacing: 20) {
+                Button("PDF 열기 및 OCR") { startOCR(for: .pdf) }
+                Button("이미지 열기 및 OCR") { startOCR(for: .image) }
+                Button("OCR 삭제") { deleteOCR(url: URL(fileURLWithPath: "")) }
             }
-            .padding()
-            .background(Color.gray.opacity(0.1))
-            .cornerRadius(10)
-            
-            // Progress bar
+
             if isProcessing {
-                ProgressView(value: progressValue, total: 1.0) {
+                ProgressView(value: progressValue) {
                     Text("처리 중... \(Int(progressValue * 100))%")
-                }
-                .padding()
-                .progressViewStyle(LinearProgressViewStyle())
+                }.padding()
             }
-            
-            // OCR content display
-            HStack(alignment: .top, spacing: 20) {
+
+            HStack {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(pageImages.indices, id: \.self) { index in
-                            Image(nsImage: pageImages[index])
+                    VStack {
+                        ForEach(pageImages.indices, id: \.self) { i in
+                            Image(nsImage: pageImages[i])
                                 .resizable()
                                 .scaledToFit()
                                 .frame(maxWidth: 300)
-                                .padding(.bottom, 10)
-                                .border(Color.gray.opacity(0.3), width: 1)
                         }
-                    }
-                    .padding()
+                    }.padding()
                 }
-                .frame(maxWidth: .infinity)
-                
-                ScrollView {
-                    TextEditor(text: $ocrResult)
-                        .padding()
-                        .background(Color.white)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.5)))
-                        .frame(minHeight: 300)
-                }
-                .frame(maxWidth: .infinity)
-            }
-            
-            // Correction suggestions
-            if !incorrectTexts.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("추천 수정")
-                        .font(.headline)
-                        .padding(.bottom, 4)
-                    
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(incorrectTexts.indices, id: \.self) { index in
-                                HStack(alignment: .top, spacing: 10) {
-                                    Text("• \(incorrectTexts[index])")
-                                        .foregroundColor(.primary)
-                                    Spacer()
-                                    Button("적용") {
-                                        self.ocrResult = self.ocrResult.replacingOccurrences(of: incorrectTexts[index], with: recommendedText)
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.blue)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(8)
-                                }
-                            }
+
+                if showResult {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextEditor(text: $ocrResult)
+                            .padding()
+                            .font(.body)
+                        
+                        
+
+                        Button("OCR 텍스트를 PDF에 텍스트 레이어로 추가") {
+                            embedOCRTextToPDFAsLayer()
                         }
+                        .padding(.horizontal)
+                        .padding(.vertical, 6)
+                        .background(Color.orange)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
                     }
-                    .frame(maxHeight: 200)
-                    .padding()
-                    .background(Color.gray.opacity(0.05))
-                    .cornerRadius(8)
-                }
-                .padding()
-            }
-        }
-        .padding()
-    }
-    func getRecommendedOCR(for text: String) -> (language: String, text: String) {
-        let recommendedLanguage = "ko-KR" // Example: recommending Korean for incorrect text
-        let correctedText = performOCR(with: recommendedLanguage, text: text) // OCR in the recommended language
-        return (language: recommendedLanguage, text: correctedText)
-    }
-    
-    func performOCR(with language: String, text: String) -> String {
-        // Example OCR processing logic for the recommended language
-        let ocrResult = "변경된 텍스트" // Replace this with actual OCR result processing
-        return ocrResult
-    }
-    
-    func getCorrection(for word: String) -> String {
-        var corrected = word
-        for (wrong, right) in correctionMap {
-            corrected = corrected.replacingOccurrences(of: wrong, with: right)
-        }
-        return corrected
-    }
-    
-    func detectIncorrectText(in text: String) -> [String] {
-        let tokens = text.components(separatedBy: .whitespacesAndNewlines)
-        var detectedIssues: [String] = []
-        
-        for token in tokens {
-            let length = token.count
-            
-            // 너무 짧거나 너무 긴 단어는 제외
-            if length < 2 || length > 30 {
-                continue
-            }
-            
-            // 특수문자가 너무 많으면 의심
-            let specialCharCount = token.filter { "!@#$%^&*()_+=[]{}|\\:;\"'<>,.?/~`".contains($0) }.count
-            if specialCharCount > 2 {
-                detectedIssues.append(token)
-                continue
-            }
-            
-            // 자주 혼동되는 문자 조합이 포함되어 있으면 의심
-            let suspiciousPatterns = ["0O", "1l", "Il", "|I", "5S", "8B"]
-            for pattern in suspiciousPatterns {
-                if token.contains(pattern) {
-                    detectedIssues.append(token)
-                    break
                 }
             }
-            
-            // 숫자/영문/한글 섞인 비정상 조합
-            let hasNumber = token.range(of: "\\d", options: .regularExpression) != nil
-            let hasLetter = token.range(of: "[A-Za-z]", options: .regularExpression) != nil
-            let hasHangul = token.range(of: "[가-힣]", options: .regularExpression) != nil
-            if (hasNumber && hasHangul) || (hasLetter && hasHangul) {
-                detectedIssues.append(token)
-            }
-        }
-        
-        return detectedIssues
+        }.padding()
     }
-    
-    func displayRecommendedCorrections(incorrectText: [String]) {
-        if incorrectText.isEmpty {
-            self.ocrResult += "\n\n모든 텍스트가 정확하게 인식되었습니다."
-        } else {
-            self.ocrResult += "\n\n잘못 인식된 부분:\n"
-            for issue in incorrectText {
-                self.ocrResult += "- \(issue) (추천 수정: 0 -> O, 1 -> l)\n"
-            }
-        }
-    }
-    
+
     func startOCR(for type: FileType) {
         isProcessing = true
         progressValue = 0
-        self.pageImages = []
+        pageImages = []
+        showResult = false
+
         let panel = NSOpenPanel()
-        switch type {
-        case .pdf:
-            panel.allowedContentTypes = [.pdf]
-        case .image:
-            panel.allowedContentTypes = [.png, .jpeg, .tiff]
-        }
+        panel.allowedContentTypes = (type == .pdf) ? [.pdf] : [.png, .jpeg, .tiff]
         panel.allowsMultipleSelection = false
-        
+
         if panel.runModal() == .OK, let url = panel.url {
-            if !ocrResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let alert = NSAlert()
-                alert.messageText = "기존 OCR 결과가 감지되었습니다."
-                alert.informativeText = "기존 결과를 삭제하고 새로 처리하시겠습니까?"
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "예, 삭제 후 계속")
-                alert.addButton(withTitle: "아니오")
-                let response = alert.runModal()
-                if response != .alertFirstButtonReturn {
-                    isProcessing = false
-                    return
+        inputPDFPath = url.path  // 선택된 파일 경로 저장
+
+            if type == .pdf, let pdf = PDFDocument(url: url) {
+                var extractedText = ""
+                for i in 0..<pdf.pageCount {
+                    if let page = pdf.page(at: i),
+                       let pageText = page.string,
+                       !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        extractedText += pageText
+                    }
                 }
-                ocrResult = ""
-            }
-            
-            if type == .pdf {
-                if let pdf = PDFDocument(url: url) {
-                    // 0. 텍스트 레이어 유무 확인
-                    var extractedText = ""
-                    for i in 0..<pdf.pageCount {
-                        if let page = pdf.page(at: i),
-                           let pageText = page.string,
-                           !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            extractedText += pageText
+
+                if !extractedText.isEmpty {
+                    let alert = NSAlert()
+                    alert.messageText = "이 PDF에는 이미 텍스트(OCR 결과)가 포함되어 있습니다."
+                    alert.informativeText = "OCR 처리를 계속하면 기존 텍스트가 제거됩니다. 계속하시겠습니까?"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "예, OCR 다시 처리")
+                    alert.addButton(withTitle: "아니오, 기존 텍스트 보기")
+
+                    let response = alert.runModal()
+                    if response == .alertFirstButtonReturn {
+                        if let cleanedPDF = deleteOCR(url: url) {
+                            processPDF(cleanedPDF)
+                        } else {
+                            isProcessing = false
                         }
-                    }
-                    
-                    if !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        let alert = NSAlert()
-                        alert.messageText = "이 PDF에는 이미 텍스트(OCR 결과)가 포함되어 있습니다."
-                        alert.informativeText = "OCR 텍스트를 제거한 후 다시 처리하시겠습니까?"
-                        alert.alertStyle = .informational
-                        alert.addButton(withTitle: "예, 제거하고 다시 OCR")
-                        alert.addButton(withTitle: "취소")
-                        let response = alert.runModal()
-                        if response != .alertFirstButtonReturn {
-                            self.isProcessing = false
-                            return
-                        }
-                        
-#if DEBUG
-                        let gsPath = "/opt/homebrew/bin/gs"
-                        guard FileManager.default.fileExists(atPath: gsPath) &&
-                                FileManager.default.isExecutableFile(atPath: gsPath) else {
-                            self.ocrResult = """
-                        Ghostscript 실행 파일을 찾을 수 없습니다.
-                        터미널에서 아래 명령어로 설치해주세요:
-                        brew install ghostscript
-                        """
-                            self.isProcessing = false
-                            return
-                        }
-                        
-                        let task = Process()
-                        let cleanURL = url.deletingLastPathComponent().appendingPathComponent("Temp_OCR_Removed.pdf")
-                        task.launchPath = gsPath
-                        task.arguments = [
-                            "-o", cleanURL.path,
-                            "-sDEVICE=pdfwrite",
-                            "-dFILTERTEXT",
-                            url.path
-                        ]
-                        
-                        let pipe = Pipe()
-                        task.standardOutput = pipe
-                        task.standardError = pipe
-                        
-                        do {
-                            try task.run()
-                            task.waitUntilExit()
-                            // 재로드
-                            if let cleanedPDF = PDFDocument(url: cleanURL) {
-                                processPDF(cleanedPDF)
-                                return
-                            } else {
-                                self.ocrResult = "텍스트 제거 후 PDF 로드 실패"
-                                self.isProcessing = false
-                                return
+                    } else {
+                        ocrResult = ""
+                        for i in 0..<pdf.pageCount {
+                            if let page = pdf.page(at: i), let text = page.string {
+                                ocrResult += "[페이지 \(i + 1)]\n" + text + "\n\n"
                             }
-                        } catch {
-                            self.ocrResult = "Ghostscript 실행 실패: \(error.localizedDescription)"
-                            self.isProcessing = false
-                            return
                         }
-#else
-                        self.ocrResult = "App Store용 빌드에서는 OCR 제거 후 재처리 기능이 비활성화되어 있습니다."
-                        self.isProcessing = false
-                        return
-#endif
+                        showResult = true
+                        isProcessing = false
                     }
-                    
+                } else {
                     processPDF(pdf)
                 }
-            } else if type == .image {
-                guard let image = NSImage(contentsOf: url),
-                      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-                else {
-                    self.ocrResult = "이미지 로드 실패"
-                    self.isProcessing = false
-                    return
-                }
-                
-                let ciImage = CIImage(cgImage: cgImage)
-                    .applyingFilter("CIColorControls", parameters: [
-                        kCIInputBrightnessKey: 0.0,
-                        kCIInputContrastKey: 1.5,
-                        kCIInputSaturationKey: 0.0
-                    ])
-                let ciContext = CIContext()
-                guard let processedCGImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-                    self.ocrResult = "이미지 전처리 실패"
-                    self.isProcessing = false
-                    return
-                }
-                
-                self.pageImages.append(NSImage(cgImage: processedCGImage, size: image.size))
-                
-                var allText = ""
-                let request = VNRecognizeTextRequest { request, error in
-                    guard let observations = request.results as? [VNRecognizedTextObservation] else { return }
-                    for observation in observations {
-                        if let topCandidate = observation.topCandidates(1).first {
-                            allText += topCandidate.string + "\n"
-                        }
+            } else if type == .image,
+                      let image = NSImage(contentsOf: url),
+                      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                performOCR(on: cgImage, size: image.size) { text in
+                    DispatchQueue.main.async {
+                        self.pageImages.append(image)
+                        self.ocrResult = text
+                        self.isProcessing = false
+                        self.showResult = true
                     }
                 }
-                request.revision = VNRecognizeTextRequestRevision3
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = true
-                let preferred = ["ko-KR", "zh-Hans", "zh-Hant", "ja-JP"]
-                let supported: [String]
-                if #available(macOS 12.0, *) {
-                    supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(for: .accurate, revision: VNRecognizeTextRequestRevision3)) ?? []
-                } else {
-                    supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(for: .accurate, revision: VNRecognizeTextRequestRevision3)) ?? []
-                }
-                request.recognitionLanguages = preferred + supported.filter { !preferred.contains($0) }
-                
-                let handler = VNImageRequestHandler(cgImage: processedCGImage, options: [:])
-                try? handler.perform([request])
-                
-                DispatchQueue.main.async {
-                    self.ocrResult = allText
-                    self.isProcessing = false
-                }
+            } else {
+                ocrResult = "파일을 열 수 없습니다."
+                isProcessing = false
             }
         } else {
-            self.isProcessing = false
+            isProcessing = false
         }
     }
-    
+
     func processPDF(_ pdf: PDFDocument) {
+        let dispatchGroup = DispatchGroup()
         var allText = ""
-        
+
         for i in 0..<pdf.pageCount {
             guard let page = pdf.page(at: i) else { continue }
-            
-            // 1. 텍스트 레이어 직접 추출 (OCR 전에 우선 시도)
-            if let pageText = page.string, !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                allText += "[페이지 \(i + 1)]\n" + pageText + "\n\n"
-                DispatchQueue.main.async {
-                    self.progressValue = Double(i + 1) / Double(pdf.pageCount)
-                }
+
+            if let text = page.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                allText += "[페이지 \(i + 1)]\n" + text + "\n\n"
                 continue
             }
-            
-            // 2. 이미지 기반 OCR 처리
+
             let bounds = page.bounds(for: .mediaBox)
             let scale: CGFloat = 2.0
-            let scaledSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-            let image = NSImage(size: scaledSize)
+            let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            let image = NSImage(size: size)
+
             image.lockFocus()
-            if let cgContext = NSGraphicsContext.current?.cgContext {
-                cgContext.interpolationQuality = .high
-                cgContext.scaleBy(x: scale, y: scale)
-                page.draw(with: .mediaBox, to: cgContext)
-            } else {
-                print("❌ NSGraphicsContext.current가 nil입니다! 페이지 \(i + 1)")
-                allText += "[페이지 \(i + 1)] 이미지 렌더링 실패\n"
-                continue
+            if let context = NSGraphicsContext.current?.cgContext {
+                context.interpolationQuality = .high
+                context.scaleBy(x: scale, y: scale)
+                page.draw(with: .mediaBox, to: context)
             }
             image.unlockFocus()
-            
-            guard let rawCGImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
-            
-            let ciImage = CIImage(cgImage: rawCGImage)
-                .applyingFilter("CIColorControls", parameters: [
-                    kCIInputBrightnessKey: 0.0,
-                    kCIInputContrastKey: 1.2,
-                    kCIInputSaturationKey: 0.0
-                ])
-            
-            let ciContext = CIContext()
-            guard let processedCGImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { continue }
-            
-            DispatchQueue.main.async {
-                self.pageImages.append(NSImage(cgImage: processedCGImage, size: NSSize(width: bounds.width, height: bounds.height)))
-            }
-            
-            let request = VNRecognizeTextRequest { req, error in
-                guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
-                for observation in observations {
-                    if let topCandidate = observation.topCandidates(1).first {
-                        allText += topCandidate.string + "\n"
-                    }
+
+            guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
+
+            dispatchGroup.enter()
+            performOCR(on: cgImage, size: bounds.size) { text in
+                allText += "[페이지 \(i + 1)]\n" + text + "\n\n"
+                DispatchQueue.main.async {
+                    self.pageImages.append(image)
+                    self.progressValue = Double(i + 1) / Double(pdf.pageCount)
                 }
-            }
-            request.revision = VNRecognizeTextRequestRevision3
-            
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            let preferred = ["ko-KR", "zh-Hans", "zh-Hant", "ja-JP"]
-            let supported: [String]
-            if #available(macOS 12.0, *) {
-                supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(for: .accurate, revision: VNRecognizeTextRequestRevision3)) ?? []
-            } else {
-                supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(for: .accurate, revision: VNRecognizeTextRequestRevision3)) ?? []
-            }
-            request.recognitionLanguages = preferred + supported.filter { !preferred.contains($0) }
-            
-            let handler = VNImageRequestHandler(cgImage: processedCGImage, options: [:])
-            try? handler.perform([request])
-            
-            if allText.isEmpty {
-                allText += "[페이지 \(i + 1)] OCR 실패\n"
-            }
-            
-            allText += "\n"
-            DispatchQueue.main.async {
-                self.progressValue = Double(i + 1) / Double(pdf.pageCount)
+                dispatchGroup.leave()
             }
         }
-        
+
+        dispatchGroup.notify(queue: .main) {
+            self.ocrResult = allText
+            self.isProcessing = false
+            self.showResult = true
+        }
         DispatchQueue.main.async {
             self.ocrResult = allText
             self.isProcessing = false
+            self.showResult = true
+            self.currentPDF = pdf  // OCR 처리가 완료된 PDF를 저장
         }
     }
-    
-    func findSuspectWords(in text: String) -> [String] {
-        let tokens = text.components(separatedBy: .whitespacesAndNewlines)
-        return tokens.filter { token in
-            token.count > 10 || token.range(of: "[^가-힣a-zA-Z0-9]", options: .regularExpression) != nil
-        }
-    }
-    
-    func deleteOCR() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.allowsMultipleSelection = false
-        
-        if panel.runModal() == .OK, let url = panel.url {
-            guard let pdf = PDFDocument(url: url) else {
-                self.ocrResult = "PDF 불러오기 실패"
-                return
-            }
-            
-            var extractedText = ""
-            for i in 0..<pdf.pageCount {
-                guard let page = pdf.page(at: i) else { continue }
-                if let pageText = page.string, !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    extractedText += pageText
+
+    func performOCR(on cgImage: CGImage, size: CGSize, completion: @escaping (String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let request = VNRecognizeTextRequest { request, error in
+                var text = ""
+                if let results = request.results as? [VNRecognizedTextObservation] {
+                    for observation in results {
+                        if let top = observation.topCandidates(1).first {
+                            text += top.string + "\n"
+                        }
+                    }
+                }
+                DispatchQueue.main.async {
+                    completion(text)
                 }
             }
-            
-            if extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.ocrResult = "이 문서에는 OCR 결과가 없는 것으로 보입니다."
-            } else {
-                let alert = NSAlert()
-                alert.messageText = "OCR 결과가 포함된 PDF입니다."
-                alert.informativeText = "텍스트 레이어를 제거하시겠습니까? 제거 시 복구할 수 없습니다."
-                alert.alertStyle = .critical
-                alert.addButton(withTitle: "OCR 제거")
-                alert.addButton(withTitle: "취소")
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
+
+            request.revision = VNRecognizeTextRequestRevision3
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["ko-KR", "en-US", "ja-JP", "zh-Hans", "zh-Hant"]
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try? handler.perform([request])
+        }
+    }
+
+    func deleteOCR(url: URL) -> PDFDocument? {
 #if DEBUG
-                    let gsPath = "/opt/homebrew/bin/gs"
-                    guard FileManager.default.fileExists(atPath: gsPath) &&
-                            FileManager.default.isExecutableFile(atPath: gsPath) else {
-                        self.ocrResult = """
-                    Ghostscript 실행 파일을 찾을 수 없습니다.
-                    터미널에서 아래 명령어로 설치해주세요:
-                    brew install ghostscript
-                    """
-                        return
+        let gsPath = "/opt/homebrew/bin/gs"
+        guard FileManager.default.isExecutableFile(atPath: gsPath) else {
+            ocrResult = "Ghostscript가 설치되어 있지 않습니다.\n'bew install ghostscript' 실행 후 다시 시도하세요."
+            return nil
+        }
+
+        let outputURL = url.deletingLastPathComponent().appendingPathComponent("OCR_Removed.pdf")
+        let task = Process()
+        task.launchPath = gsPath
+        task.arguments = ["-o", outputURL.path, "-sDEVICE=pdfwrite", "-dFILTERTEXT", url.path]
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = outputPipe
+        task.standardError = errorPipe
+
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            if let output = String(data: handle.availableData, encoding: .utf8) {
+                print("[DEBUG] Python Output: \(output)")
+                if let progress = Double(output.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    DispatchQueue.main.async {
+                        self.progressValue = progress
                     }
-                    
-                    let task = Process()
-                    task.launchPath = gsPath
-                    let outputURL = url.deletingLastPathComponent().appendingPathComponent("OCR_Removed.pdf")
-                    task.arguments = [
-                        "-o", outputURL.path,
-                        "-sDEVICE=pdfwrite",
-                        "-dFILTERTEXT",
-                        url.path
-                    ]
-                    
-                    let pipe = Pipe()
-                    task.standardOutput = pipe
-                    task.standardError = pipe
-                    
-                    do {
-                        try task.run()
-                        task.waitUntilExit()
-                        self.ocrResult = "Ghostscript를 이용해 OCR 텍스트가 제거된 PDF를 저장했습니다: \(outputURL.lastPathComponent)"
-                    } catch {
-                        self.ocrResult = "Ghostscript 실행 실패: \(error.localizedDescription)"
-                    }
+                }
+            }
+        }
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return PDFDocument(url: outputURL)
+        } catch {
+            ocrResult = "Ghostscript 실행 실패: \(error.localizedDescription)"
+            return nil
+        }
 #else
-                    self.ocrResult = "App Store용 빌드에서는 Ghostscript 기반 OCR 제거 기능이 비활성화되어 있습니다."
+        ocrResult = "릴리즈 빌드에서는 이 기능을 사용할 수 없습니다."
+        return nil
 #endif
-                } else {
-                    self.ocrResult = "OCR 제거가 취소되었습니다."
+    }
+
+    func embedOCRTextToPDFAsLayer() {
+        guard let pdf = currentPDF else {
+            ocrResult += "\n\n❌ 처리된 PDF가 없습니다. 먼저 PDF OCR 처리를 진행하세요."
+            return
+        }
+
+        isProcessing = true
+        progressValue = 0.0
+
+        // OCR 결과를 저장할 딕셔너리
+        var ocrResults: [String: [[String: Any]]] = [:]
+
+DispatchQueue.global(qos: .userInitiated).async {
+        for pageIndex in 0..<pdf.pageCount {
+            guard let page = pdf.page(at: pageIndex) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+
+            // PDF 페이지를 이미지로 렌더링
+            let scale: CGFloat = 2.0
+            let imageSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            let image = NSImage(size: imageSize)
+
+            image.lockFocus()
+            if let context = NSGraphicsContext.current?.cgContext {
+                context.interpolationQuality = .high
+                context.scaleBy(x: scale, y: scale)
+                page.draw(with: .mediaBox, to: context)
+            }
+            image.unlockFocus()
+
+            guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
+
+            let request = VNRecognizeTextRequest { request, error in
+                guard let results = request.results as? [VNRecognizedTextObservation] else { return }
+
+                var pageResults: [[String: Any]] = []
+
+                for observation in results {
+                    guard let candidate = observation.topCandidates(1).first else { continue }
+                    let box = observation.boundingBox
+
+                    // Vision의 normalized 좌표를 PDF 좌표로 변환
+                    let x = box.origin.x * bounds.width
+                    let y = (1 - box.origin.y - box.height) * bounds.height
+                    let width = box.width * bounds.width
+                    let height = box.height * bounds.height
+
+                    // OCR 결과 저장
+                    pageResults.append([
+                        "text": candidate.string,
+                        "x": x,
+                        "y": y,
+                        "width": width,
+                        "height": height
+                    ])
+                }
+
+                ocrResults["\(pageIndex)"] = pageResults
+            }
+
+            request.revision = VNRecognizeTextRequestRevision3
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["ko-KR", "en-US", "ja-JP", "zh-Hans", "zh-Hant"]
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try? handler.perform([request])
+        
+                // Progress 업데이트
+                DispatchQueue.main.async {
+                    self.progressValue = Double(pageIndex + 1) / Double(pdf.pageCount)
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.progressValue = 1.0
+                self.ocrResult += "\n\n✅ OCR 텍스트 레이어가 PDF에 성공적으로 추가되었습니다."
+            }
+
+            // Python 스크립트 실행
+            runPythonScript()
+        }
+    }
+
+    func runPythonScript() {
+        let pythonScriptPath = "/Users/minyeop-jang/Desktop/PDFOCRApp/PDFOCRApp/View/ocr.py"
+
+        guard let inputPDFPath = inputPDFPath else {
+            print("[ERROR] 입력 PDF 파일 경로가 설정되지 않았습니다.")
+            return
+        }
+        
+        DispatchQueue.main.async {
+            let savePanel = NSSavePanel()
+            savePanel.allowedContentTypes = [.pdf]
+
+            // 이미 guard로 언래핑했으므로 바로 inputPDFPath 사용
+            let inputURL = URL(fileURLWithPath: inputPDFPath)
+            let baseName = inputURL.deletingPathExtension().lastPathComponent
+            savePanel.nameFieldStringValue = "\(baseName)_OCR.pdf"
+
+            guard savePanel.runModal() == .OK, let outputURL = savePanel.url else {
+                print("[ERROR] 출력 PDF 파일 저장 경로를 설정하지 않았습니다.")
+                return
+            }
+
+            let outputPDFPath = outputURL.path
+
+            print("[DEBUG] Python Script Path: \(pythonScriptPath)")
+            print("[DEBUG] Input PDF Path: \(inputPDFPath)")
+            print("[DEBUG] Output PDF Path: \(outputPDFPath)")
+
+            // Python 스크립트 실행
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                process.arguments = [pythonScriptPath, inputPDFPath, outputPDFPath]
+
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+
+                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+                    if let output = String(data: outputData, encoding: .utf8) {
+                        print("[DEBUG] Python Output: \(output)")
+                    }
+                    if let error = String(data: errorData, encoding: .utf8) {
+                        print("[DEBUG] Python Error: \(error)")
+                    }
+
+                    if process.terminationStatus == 0 {
+                        print("[DEBUG] Python 스크립트 실행 성공")
+                    } else {
+                        print("[ERROR] Python 스크립트 실행 실패")
+                    }
+                } catch {
+                    print("[ERROR] Python 스크립트 실행 중 오류 발생: \(error.localizedDescription)")
                 }
             }
         }
